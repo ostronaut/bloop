@@ -36,7 +36,7 @@ object Dependencies {
   val groovyVersion = "2.5.4"
   val gradleAndroidPluginVersion = "4.2.2"
   val ipcsocketVersion = "1.0.1"
-  val monixVersion = "3.2.0"
+  val monixVersion = "3.2.2"
   val circeVersion = "0.9.3"
   val jsoniterVersion = "2.13.3.2"
   val circeVersion213 = "0.12.2"
