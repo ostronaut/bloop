@@ -4,19 +4,7 @@ import java.io.File
 
 import ch.epfl.scala.sbt.release.Feedback
 import com.jsuereth.sbtpgp.SbtPgp.{autoImport => Pgp}
-import sbt.{
-  AutoPlugin,
-  BuildPaths,
-  Def,
-  Keys,
-  PluginTrigger,
-  Plugins,
-  State,
-  Task,
-  ThisBuild,
-  uri,
-  Reference
-}
+import sbt._
 import sbt.io.IO
 import sbt.io.syntax.fileToRichFile
 import sbt.librarymanagement.syntax.stringToOrganization
@@ -27,6 +15,7 @@ import sbt.internal.BuildLoader
 import sbt.librarymanagement.MavenRepository
 import build.BloopShadingPlugin.{autoImport => BloopShadingKeys}
 import sbt.util.Logger
+import sbtbuildinfo.BuildInfoPlugin.{autoImport => BuildInfoKeys}
 
 object BuildPlugin extends AutoPlugin {
   import sbt.plugins.JvmPlugin
@@ -48,8 +37,6 @@ object BuildPlugin extends AutoPlugin {
 }
 
 object BuildKeys {
-  import sbt.{RootProject, ProjectRef, BuildRef, file, uri}
-
   def inProject(ref: Reference)(ss: Seq[Def.Setting[_]]): Seq[Def.Setting[_]] =
     sbt.inScope(sbt.ThisScope.in(project = ref))(ss)
 
@@ -66,7 +53,8 @@ object BuildKeys {
   def createScalaCenterProject(name: String, f: File): RootProject = {
     if (isCiDisabled) RootProject(f)
     else {
-      val headSha = new _root_.com.typesafe.sbt.git.DefaultReadableGit(f).withGit(_.headCommitSha)
+      val headSha = new _root_.com.github.sbt.git.DefaultReadableGit(base = f, gitOverride = None)
+        .withGit(_.headCommitSha)
       headSha match {
         case Some(commit) => RootProject(uri(s"https://github.com/scalacenter/${name}.git#$commit"))
         case None => sys.error(s"The 'HEAD' sha of '${f}' could not be retrieved.")
@@ -79,9 +67,7 @@ object BuildKeys {
   final val BenchmarkBridgeBuild = BuildRef(BenchmarkBridgeProject.build)
   final val BenchmarkBridgeCompilation = ProjectRef(BenchmarkBridgeProject.build, "compilation")
 
-  import sbt.{Test, TestFrameworks, Tests}
   val buildBase = (ThisBuild / Keys.baseDirectory)
-  val buildIntegrationsBase = Def.settingKey[File]("The base directory for our integration builds.")
   val exportCommunityBuild = Def.taskKey[Unit]("Clone and export the community build.")
   val lazyFullClasspath =
     Def.taskKey[Seq[File]]("Return full classpath without forcing compilation")
@@ -99,8 +85,6 @@ object BuildKeys {
   val releaseEarlyAllModules = Def.taskKey[Unit]("Release early all modules")
   val releaseSonatypeBundle = Def.taskKey[Unit]("Release sonatype bundle, do nothing if no release")
   val publishLocalAllModules = Def.taskKey[Unit]("Publish all modules locally")
-
-  val gradleIntegrationDirs = sbt.AttributeKey[List[File]]("gradleIntegrationDirs")
 
   // This has to be change every time the bloop config files format changes.
   val schemaVersion = Def.settingKey[String]("The schema version for our bloop build.")
@@ -122,7 +106,6 @@ object BuildKeys {
     nailgunClientLocation := buildBase.value / "nailgun" / "pynailgun" / "ng.py"
   )
 
-  import sbt.Compile
   val buildpressSettings: Seq[Def.Setting[_]] = List(
     (Keys.run / Keys.fork) := true
   )
@@ -234,8 +217,6 @@ object BuildKeys {
 }
 
 object BuildImplementation {
-  import sbt.{url, file}
-  import sbt.{Developer, Resolver, Watched, Compile, Test}
   import sbtdynver.DynVerPlugin.{autoImport => DynVerKeys}
 
   // This should be added to upstream sbt.
@@ -261,8 +242,8 @@ object BuildImplementation {
     // Keys.triggeredMessage := Watched.clearWhenTriggered,
     Keys.resolvers := {
       val oldResolvers = Keys.resolvers.value
-      val sonatypeStaging = Resolver.sonatypeRepo("staging")
-      (oldResolvers :+ sonatypeStaging).distinct
+      val sonatypeStaging = Resolver.sonatypeOssRepos("staging")
+      (oldResolvers ++ sonatypeStaging).distinct
     },
     ReleaseEarlyKeys.releaseEarlyWith := {
       ReleaseEarlyKeys.SonatypePublisher
@@ -284,7 +265,6 @@ object BuildImplementation {
     )
   )
 
-  import sbt.{CrossVersion, compilerPlugin}
   final val metalsSettings: Seq[Def.Setting[_]] = Seq(
     Keys.scalacOptions ++= {
       if (Keys.scalaBinaryVersion.value.startsWith("2.10")) Nil
@@ -327,7 +307,7 @@ object BuildImplementation {
     },
     (Compile / Keys.publishLocalConfiguration) :=
       Keys.publishLocalConfiguration.value.withOverwrite(true)
-  ) // ++ metalsSettings
+  )
 
   final val reasonableCompileOptions = (
     "-deprecation" :: "-encoding" :: "UTF-8" :: "-feature" :: "-language:existentials" ::
@@ -413,50 +393,6 @@ object BuildImplementation {
       sbt.BuildPaths.getStagingDirectory(state, globalBase)
     }
 
-    import sbt.librarymanagement.Artifact
-    import ch.epfl.scala.sbt.maven.MavenPluginKeys
-    val mavenPluginBuildSettings: Seq[Def.Setting[_]] = List(
-      MavenPluginKeys.mavenPlugin := true,
-      Keys.publishLocal := Keys.publishM2.value,
-      Keys.classpathTypes += "maven-plugin",
-      // This is a bug in sbt, so we fix it here.
-      Keys.makePomConfiguration :=
-        Keys.makePomConfiguration.value.withIncludeTypes(Keys.classpathTypes.value),
-      Keys.libraryDependencies ++= List(
-        Dependencies.mavenCore,
-        Dependencies.mavenPluginApi,
-        Dependencies.mavenPluginAnnotations,
-        // We add an explicit dependency to the maven-plugin artifact in the dependent plugin
-        Dependencies.mavenScalaPlugin
-          .withExplicitArtifacts(Vector(Artifact("scala-maven-plugin", "maven-plugin", "jar")))
-      )
-    )
-
-    import sbtbuildinfo.BuildInfoPlugin.{autoImport => BuildInfoKeys}
-    val gradlePluginBuildSettings: Seq[Def.Setting[_]] = {
-      sbtbuildinfo.BuildInfoPlugin.buildInfoScopedSettings(Test) ++ List(
-        (Test / Keys.fork) := true,
-        Keys.resolvers ++= List(
-          MavenRepository("Gradle releases", "https://repo.gradle.org/gradle/libs-releases-local/"),
-          MavenRepository("Android plugin", "https://maven.google.com/"),
-          MavenRepository("Android dependencies", "https://repo.spring.io/plugins-release/")
-        ),
-        Keys.libraryDependencies ++= List(
-          Dependencies.gradleAPI,
-          Dependencies.gradleTestKit,
-          Dependencies.gradleCore,
-          Dependencies.gradleToolingApi,
-          Dependencies.groovy,
-          Dependencies.gradleAndroidPlugin
-        ),
-        Keys.publishLocal := Keys.publishLocal.dependsOn(Keys.publishM2).value,
-        // Only generate for tests (they are not published and can contain user-dependent data)
-        (Compile / BuildInfoKeys.buildInfo) := Nil,
-        (Test / BuildInfoKeys.buildInfoPackage) := "bloop.internal.build",
-        (Test / BuildInfoKeys.buildInfoObject) := "BloopGradleIntegration"
-      )
-    }
-
     val frontendTestBuildSettings: Seq[Def.Setting[_]] = {
       sbtbuildinfo.BuildInfoPlugin.buildInfoScopedSettings(Test) ++ List(
         BuildKeys.bloopCoursierJson := ReleaseUtils.bloopCoursierJson.value,
@@ -522,12 +458,6 @@ object BuildImplementation {
       }
     }
 
-    val fixScalaVersionForSbtPlugin: Def.Initialize[String] = Def.setting {
-      val orig = Keys.scalaVersion.value
-      val is013 = (Keys.pluginCrossBuild / Keys.sbtVersion).value.startsWith("0.13")
-      if (is013) "2.10.7" else orig
-    }
-
     // From sbt-sensible https://gitlab.com/fommil/sbt-sensible/issues/5, legal requirement
     val getLicense: Def.Initialize[Task[Seq[File]]] = Def.task {
       val orig = (Compile / Keys.resources).value
@@ -557,14 +487,12 @@ object BuildImplementation {
   }
 
   import java.util.Locale
-  import sbt.MessageOnlyException
-  import sbt.{Compile}
   import scala.sys.process.Process
   import java.nio.file.Files
   val buildpressHomePath = System.getProperty("user.home") + "/.buildpress"
   def exportCommunityBuild(
       buildpress: Reference,
-      sbtBloop10: Reference
+      sbtBloop: Reference
   ) = Def.taskDyn {
     val isWindows: Boolean =
       System.getProperty("os.name").toLowerCase(Locale.ENGLISH).contains("windows")
@@ -582,7 +510,7 @@ object BuildImplementation {
       val bloopVersion = Keys.version.value
       Def.task {
         // Publish the projects before we invoke buildpress
-        (sbtBloop10 / Keys.publishLocal).value
+        (sbtBloop / Keys.publishLocal).value
 
         val file = Keys.resourceDirectory
           .in(Compile)
